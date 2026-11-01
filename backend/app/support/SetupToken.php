@@ -113,28 +113,28 @@ class SetupToken
         $stagedDatabase = $directory . DIRECTORY_SEPARATOR . $state['database'];
         $stagedEnvironment = $this->root . $state['environment'];
         $environment = $this->root . '.env';
-        if (!file_exists($environment)) {
-            if (!is_file($stagedEnvironment) || is_link($stagedEnvironment)
-                || !hash_equals((string)($state['environment_hash'] ?? ''), hash_file('sha256', $stagedEnvironment))) {
-                throw new \RuntimeException('安装恢复配置不完整');
+        $environmentExists = file_exists($environment);
+        $environmentSource = $environmentExists ? $environment : $stagedEnvironment;
+        if (!is_file($environmentSource) || is_link($environmentSource)
+            || !hash_equals((string)($state['environment_hash'] ?? ''), hash_file('sha256', $environmentSource))) {
+            throw new \RuntimeException('安装恢复配置不完整或已有配置不属于此次安装');
+        }
+        if (is_link($database) || is_link($stagedDatabase)) {
+            throw new \RuntimeException('安装恢复文件无效');
+        }
+        if (file_exists($database)) {
+            if (!is_file($database) || !hash_equals((string)($state['database_hash'] ?? ''), hash_file('sha256', $database))) {
+                throw new \RuntimeException('已有数据库不属于此次安装，拒绝覆盖');
             }
-            if (is_link($database) || is_link($stagedDatabase)) {
-                throw new \RuntimeException('安装恢复文件无效');
+        } else {
+            if (!is_file($stagedDatabase)
+                || !hash_equals((string)($state['database_hash'] ?? ''), hash_file('sha256', $stagedDatabase))
+                || !@link($stagedDatabase, $database)) {
+                throw new \RuntimeException('无法恢复数据库发布');
             }
-            if (file_exists($database)) {
-                if (!is_file($database) || !hash_equals((string)($state['database_hash'] ?? ''), hash_file('sha256', $database))) {
-                    throw new \RuntimeException('已有数据库不属于此次安装，拒绝覆盖');
-                }
-            } else {
-                if (!is_file($stagedDatabase)
-                    || !hash_equals((string)($state['database_hash'] ?? ''), hash_file('sha256', $stagedDatabase))
-                    || !@link($stagedDatabase, $database)) {
-                    throw new \RuntimeException('无法恢复数据库发布');
-                }
-            }
-            if (!@link($stagedEnvironment, $environment)) {
-                throw new \RuntimeException('无法恢复配置发布');
-            }
+        }
+        if (!$environmentExists && !@link($stagedEnvironment, $environment)) {
+            throw new \RuntimeException('无法恢复配置发布');
         }
         $this->consume();
         @file_put_contents($this->root . '.installed', "installed\n", LOCK_EX);

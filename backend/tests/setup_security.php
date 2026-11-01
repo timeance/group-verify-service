@@ -141,6 +141,25 @@ try {
             && !$crashTokens->active(), 'crash journal resumes authorized publication (' . ($publishBeforeCrash ? 'database published' : 'fully staged') . ')');
     }
 
+    $conflict = $fixtures[] = fixture();
+    $conflictToken = issue($conflict);
+    $conflictDb = tempnam($conflict . 'database', '.setup-');
+    $conflictEnv = tempnam($conflict, '.setup-');
+    file_put_contents($conflictDb, 'staged-database');
+    file_put_contents($conflictEnv, 'intended-configuration');
+    $conflictTokens = new SetupToken($conflict);
+    $conflictTokens->prepare($conflictDb, $conflictEnv, 'sqlite.db');
+    file_put_contents($conflict . '.env', 'pre-existing-configuration');
+    check(status(callSetup($conflict)) === 503
+        && file_get_contents($conflict . '.env') === 'pre-existing-configuration'
+        && is_file($conflict . '.setup-progress.json') && is_file($conflictDb)
+        && $conflictTokens->matches($conflictToken)
+        && !is_file($conflict . '.installed'), 'conflicting final configuration preserves recovery state and token');
+    file_put_contents($conflict . '.env', 'intended-configuration');
+    check(status(callSetup($conflict)) === 404
+        && file_get_contents($conflict . 'database/sqlite.db') === 'staged-database'
+        && !is_file($conflict . '.setup-progress.json'), 'matching final configuration still requires database recovery before consume');
+
     $parallel = $fixtures[] = fixture();
     $parallelToken = issue($parallel);
     $lock = (new SetupToken($parallel))->lock();
