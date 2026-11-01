@@ -8,6 +8,16 @@ use think\facade\Db;
 class VerifyController extends BaseController
 {
     /**
+     * 机器人接口在控制器层再次鉴权，避免通过未声明的控制器入口绕过路由中间件。
+     * page/status/callback/adminPage 保持公开，不加入此列表。
+     */
+    protected $middleware = [
+        \app\middleware\ApiAuth::class => [
+            'only' => ['create', 'check', 'clean', 'resetKey'],
+        ],
+    ];
+
+    /**
      * @title 生成验证链接
      * @desc 生成验证链接
      * @author VanillaNahida
@@ -22,6 +32,10 @@ class VerifyController extends BaseController
             $apiKeyId = (int)$this->request->middleware('api_key_id', 0);
         } catch (\Throwable $e) {
             $apiKeyId = 0;
+        }
+
+        if ($apiKeyId <= 0) {
+            return json(['code' => 401, 'msg' => 'Unauthorized'], 401);
         }
 
         $ip = '';
@@ -55,7 +69,9 @@ class VerifyController extends BaseController
         $token = GeetestModel::generateToken($groupId, $userId);
         
         //保存验证数据
-        GeetestModel::saveVerifyData($token, ['api_key_id' => $apiKeyId, 'group_id' => $groupId,'user_id' => $userId,'verified' => false,'code' => null]);
+        if (!GeetestModel::saveVerifyData($token, ['api_key_id' => $apiKeyId, 'group_id' => $groupId,'user_id' => $userId,'verified' => false,'code' => null])) {
+            return json(['code' => 500, 'msg' => '验证记录保存失败'], 500);
+        }
         
         // 生成验证链接
         $validate = $this->request->domain() . '/v/' . $token;
@@ -239,12 +255,18 @@ class VerifyController extends BaseController
             return json(['code' => 429, 'msg' => '请求过于频繁，请稍后重试', 'passed' => false], 429)->header(['Retry-After' => (string)$retryAfter]);
         }
 
-        $groupId = $this->request->post('group_id', '');
-        $userId = $this->request->post('user_id', '');
-        $code = $this->request->post('code', '');
+        $groupId = trim((string)$this->request->post('group_id', ''));
+        $userId = trim((string)$this->request->post('user_id', ''));
+        $code = trim((string)$this->request->post('code', ''));
+        $apiKeyId = 0;
+        try {
+            $apiKeyId = (int)$this->request->middleware('api_key_id', 0);
+        } catch (\Throwable $e) {
+            $apiKeyId = 0;
+        }
         
-        if (empty($groupId) || empty($code)) {
-            return json(['code' => 400, 'msg' => '参数错误：缺少必填参数 group_id 或 code', 'passed' => false], 400);
+        if ($apiKeyId <= 0 || $groupId === '' || $userId === '' || $code === '') {
+            return json(['code' => 400, 'msg' => '参数错误：缺少必填参数 group_id、user_id、code 或 API Key', 'passed' => false], 400);
         }
 
         // 按 group_id 维度限流，防止对同一群组暴力猜测验证码
@@ -258,14 +280,15 @@ class VerifyController extends BaseController
             return json(['code' => 400, 'msg' => '参数错误：group_id 必须为数字', 'passed' => false], 400);
         }
 
-        if (!empty($userId) && !ctype_digit($userId)) {
+        if (!ctype_digit($userId)) {
             return json(['code' => 400, 'msg' => '参数错误：user_id 必须为数字', 'passed' => false], 400);
         }
         
-        $data = GeetestModel::findByCode($code, $groupId);
+        // 验证码必须同时属于当前 API Key、群和用户；缺少归属的旧记录不会匹配。
+        $data = GeetestModel::findByCode($code, $groupId, $userId, $apiKeyId);
         
         if (!$data) {
-            $allStatusData = GeetestModel::findCodeByAllStatus($code, $groupId);
+            $allStatusData = GeetestModel::findCodeByAllStatus($code, $groupId, $userId, $apiKeyId);
             
             if ($allStatusData) {
                 if ($allStatusData['used'] == 1) {
@@ -282,12 +305,8 @@ class VerifyController extends BaseController
             return json(['code' => 400, 'msg' => '验证失败：验证码不存在或已失效', 'passed' => false], 400);
         }
         
-        if (!empty($userId) && $data['user_id'] !== $userId) {
-            return json(['code' => 400, 'msg' => '验证失败：用户ID不匹配', 'passed' => false], 400);
-        }
-
         // 标记验证码为已使用（原子操作，防止并发重复使用）
-        $marked = GeetestModel::markCodeAsUsed($code, $groupId);
+        $marked = GeetestModel::markCodeAsUsed($code, $groupId, $userId, $apiKeyId);
         if (!$marked) {
             return json(['code' => 400, 'msg' => '验证失败：验证码已使用', 'passed' => false], 400);
         }

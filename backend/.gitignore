@@ -8,3 +8,6 @@ geetest.db
 /.buildpath
 /.project
 /database/*.db
+/.setup*
+/.installed
+/vendor/

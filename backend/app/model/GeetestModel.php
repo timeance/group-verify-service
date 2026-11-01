@@ -1,6 +1,7 @@
 <?php
 namespace app\model;
 
+use app\support\GeetestEndpoint;
 use think\facade\Request;
 use think\facade\Db;
 
@@ -72,7 +73,14 @@ class GeetestModel
 
         self::$captchaId = (string)self::getSetting('GEETEST_CAPTCHA_ID', '');
         self::$captchaKey = (string)self::getSetting('GEETEST_CAPTCHA_KEY', '');
-        self::$apiServer = (string)self::getSetting('GEETEST_API_SERVER', 'https://gcaptcha4.geetest.com');
+        $apiServer = trim((string)self::getSetting('GEETEST_API_SERVER', GeetestEndpoint::defaultEndpoint()));
+        if (!GeetestEndpoint::isAllowed($apiServer)) {
+            // 已存储的非法值不能静默回退后继续外呼，否则会掩盖配置漂移。
+            // 前端展示/安装流程可以使用安全默认值，但服务端验证必须 fail-closed。
+            \think\facade\Log::warning('GeetestModel::initConfig - GEETEST_API_SERVER 不在 HTTPS allowlist 中，已禁止服务端外呼');
+            $apiServer = '';
+        }
+        self::$apiServer = rtrim($apiServer, '/');
         self::$codeExpire = (int)self::getSetting('GEETEST_CODE_EXPIRE', 300);
         self::$salt = (string)self::getSetting('SALT', '');
 
@@ -165,9 +173,15 @@ class GeetestModel
         self::initConfig();
         self::ensureOwnershipReady();
 
+        $apiKeyId = (int)($data['api_key_id'] ?? 0);
+        if ($apiKeyId <= 0) {
+            // 新记录必须有明确的 API Key 归属；历史无归属记录只允许自然过期。
+            return false;
+        }
+
         $validate = new GeetestTable();
         $validate->token = $token;
-        $validate->api_key_id = (int)($data['api_key_id'] ?? 0);
+        $validate->api_key_id = $apiKeyId;
         $validate->group_id = $data['group_id'];
         $validate->user_id = $data['user_id'];
         $validate->code = $data['code'] ?? null;
@@ -200,12 +214,19 @@ class GeetestModel
         return $validate->toArray();
     }
 
-    public static function findByCode(string $code, string $gid)
+    public static function findByCode(string $code, string $gid, string $uid, int $apiKeyId)
     {
         self::initConfig();
+        self::ensureOwnershipReady();
+
+        if ($uid === '' || $apiKeyId <= 0) {
+            return null;
+        }
 
         $validate = GeetestTable::where('code', $code)
             ->where('group_id', $gid)
+            ->where('user_id', $uid)
+            ->where('api_key_id', $apiKeyId)
             ->where('verified', 1)
             ->where('used', 0)
             ->where('expire_at', '>', time())
@@ -218,12 +239,19 @@ class GeetestModel
         return null;
     }
 
-    public static function findCodeByAllStatus(string $code, string $gid)
+    public static function findCodeByAllStatus(string $code, string $gid, string $uid, int $apiKeyId)
     {
         self::initConfig();
+        self::ensureOwnershipReady();
+
+        if ($uid === '' || $apiKeyId <= 0) {
+            return null;
+        }
 
         $validate = GeetestTable::where('code', $code)
             ->where('group_id', $gid)
+            ->where('user_id', $uid)
+            ->where('api_key_id', $apiKeyId)
             ->where('verified', 1)
             ->find();
 
@@ -292,7 +320,11 @@ class GeetestModel
             'captcha_id' => self::$captchaId,
         ];
 
-        $url = self::$apiServer . '/validate?captcha_id=' . self::$captchaId;
+        if (!GeetestEndpoint::isAllowed(self::$apiServer)) {
+            return false;
+        }
+
+        $url = rtrim(self::$apiServer, '/') . '/validate?captcha_id=' . rawurlencode(self::$captchaId);
 
         $result = curl($url, $postData, 10, 'POST');
 
@@ -332,14 +364,20 @@ class GeetestModel
         return $q->delete();
     }
 
-    public static function markCodeAsUsed(string $code, string $gid)
+    public static function markCodeAsUsed(string $code, string $gid, string $uid, int $apiKeyId)
     {
         self::initConfig();
+
+        if ($uid === '' || $apiKeyId <= 0) {
+            return false;
+        }
 
         $now = time();
         // 使用条件更新避免并发竞态：只有 used=0 的记录才会被更新
         $affected = GeetestTable::where('code', $code)
             ->where('group_id', $gid)
+            ->where('user_id', $uid)
+            ->where('api_key_id', $apiKeyId)
             ->where('verified', 1)
             ->where('used', 0)
             ->where('expire_at', '>', $now)

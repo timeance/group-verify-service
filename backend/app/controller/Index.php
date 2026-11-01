@@ -18,17 +18,36 @@ class Index extends BaseController
 
     public function setup()
     {
-        $rootPath = root_path();
-        $envPath = $rootPath . '.env';
-
-        if (is_file($envPath)) {
+        $tokens = new \app\support\SetupToken(root_path());
+        try {
+            $lock = $tokens->lock();
+        } catch (\Throwable $e) {
             return response('', 404);
         }
-
-        // 安全检查：即使 .env 被删除，如果数据库中已有配置数据，也拒绝重新初始化
-        if ($this->isAlreadyInitialized()) {
-            return response('系统已初始化，禁止重复操作。如需重新配置，请手动清理数据库。', 403);
+        try {
+            $tokens->recover();
+            if ($tokens->installed() || !$tokens->active()) {
+                return response('', 404);
+            }
+            if ($this->request->isPost()) {
+                $token = $this->request->post('setup_token', '');
+                if (!is_string($token) || !$tokens->matches($token)) {
+                    return response('安装凭据无效或已过期', 403);
+                }
+            }
+            return $this->setupWithToken($tokens);
+        } catch (\Throwable $e) {
+            return response('安装状态暂不可用，请检查服务器安装状态与目录权限。', 503);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
         }
+    }
+
+    private function setupWithToken(\app\support\SetupToken $tokens)
+    {
+        $rootPath = root_path();
+        $envPath = $rootPath . '.env';
 
         $defaults = [
             'app_debug'            => 'false',
@@ -36,9 +55,9 @@ class Index extends BaseController
             'geetest_captcha_key'  => '',
             'geetest_api_server'   => 'https://gcaptcha4.geetest.com',
             'geetest_code_expire'  => '300',
-            'api_key'              => $this->generateApiKey(),
-            'salt'                 => $this->generateSalt(),
-            'db_sqlite_path'       => './database/sqlite.db',
+            'api_key'              => '',
+            'salt'                 => '',
+            'db_sqlite_path'       => 'sqlite.db',
         ];
 
         $checks = $this->collectSetupChecks($rootPath);
@@ -63,10 +82,7 @@ class Index extends BaseController
         }
 
         if ($values['salt'] === '') {
-            $values['salt'] = $defaults['salt'];
-        }
-        if ($values['api_key'] === '') {
-            $values['api_key'] = $defaults['api_key'];
+            $values['salt'] = $this->generateSalt();
         }
 
         $errors = $this->validateSetupValues($values);
@@ -97,22 +113,58 @@ class Index extends BaseController
             return $this->renderSetupForm(['项目根目录不可写，无法生成 .env，请检查权限'], $values, $checks);
         }
 
-        $envContent = $this->buildEnvContent($values);
-        if (@file_put_contents($envPath, $envContent, LOCK_EX) === false) {
-            return $this->renderSetupForm(['写入 .env 失败，请检查权限'], $values, $checks);
-        }
-
         $dbPath = $this->resolveSqlitePath($values['db_sqlite_path'], $rootPath);
-        $initResult = $this->initSqliteDatabase($dbPath, $rootPath);
-        if ($initResult !== true) {
-            @unlink($envPath);
-            return $this->renderSetupForm([$initResult], $values, $checks);
+        // Setup never modifies any existing database, including empty/corrupt files.
+        if (file_exists($dbPath) || is_link($dbPath)) {
+            return $this->renderSetupForm(['数据库文件已存在，请选择新的安全 .db 文件名'], $values, $checks);
         }
-
-        $persistResult = $this->persistSettingsToSqlite($dbPath, $values);
-        if ($persistResult !== true) {
-            @unlink($envPath);
-            return $this->renderSetupForm([$persistResult], $values, $checks);
+        $stagedDb = tempnam($databaseDir, '.setup-');
+        $stagedEnv = tempnam($rootPath, '.setup-');
+        $publishedDb = false;
+        $pdo = null;
+        try {
+            if ($stagedDb === false || $stagedEnv === false) {
+                throw new \RuntimeException('无法创建安装临时文件');
+            }
+            @chmod($stagedDb, 0600);
+            @chmod($stagedEnv, 0600);
+            $pdo = new \PDO('sqlite:' . $stagedDb);
+            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+            $pdo->beginTransaction();
+            $initResult = $this->initSqliteDatabase($stagedDb, $rootPath, $pdo);
+            $persistResult = $initResult === true ? $this->persistSettingsToSqlite($stagedDb, $values, $pdo) : $initResult;
+            if ($persistResult !== true) {
+                throw new \RuntimeException('数据库初始化失败');
+            }
+            $pdo->commit();
+            $pdo = null;
+            $envContent = $this->buildEnvContent($values);
+            if (file_put_contents($stagedEnv, $envContent) !== strlen($envContent)) {
+                throw new \RuntimeException('无法准备配置');
+            }
+            $tokens->prepare($stagedDb, $stagedEnv, $values['db_sqlite_path']);
+            // Hard-link publication is atomic and refuses to replace an existing file.
+            // Both staged files reside on the same filesystem as their destinations.
+            if (!@link($stagedDb, $dbPath)) {
+                throw new \RuntimeException('无法发布数据库');
+            }
+            $publishedDb = true;
+            if (!@link($stagedEnv, $envPath)) {
+                throw new \RuntimeException('无法发布配置');
+            }
+            $tokens->consume();
+            @file_put_contents($rootPath . '.installed', "installed\n", LOCK_EX);
+            $tokens->discardPending();
+        } catch (\Throwable $e) {
+            if ($pdo !== null && $pdo->inTransaction()) { $pdo->rollBack(); }
+            $pdo = null;
+            // Only remove a file created by this attempt, never pre-existing data/config.
+            if ($publishedDb && !file_exists($envPath)) { @unlink($dbPath); }
+            $tokens->discardPending();
+            return $this->renderSetupForm(['初始化失败，已有数据未修改；请检查目录权限后使用有效凭据重试。'], $values, $checks);
+        } finally {
+            if (is_string($stagedDb) && is_file($stagedDb)) { @unlink($stagedDb); }
+            if (is_string($stagedEnv) && is_file($stagedEnv)) { @unlink($stagedEnv); }
         }
 
         return $this->renderSetupSuccess();
@@ -120,20 +172,7 @@ class Index extends BaseController
 
     private function generateSalt(): string
     {
-        try {
-            return bin2hex(random_bytes(32));
-        } catch (\Throwable $e) {
-            return hash('sha256', uniqid('', true) . microtime(true));
-        }
-    }
-
-    private function generateApiKey(): string
-    {
-        try {
-            return bin2hex(random_bytes(32));
-        } catch (\Throwable $e) {
-            return hash('sha256', uniqid('api_key', true) . microtime(true));
-        }
+        return bin2hex(random_bytes(32));
     }
 
     private function collectSetupChecks(string $rootPath): array
@@ -184,8 +223,8 @@ class Index extends BaseController
         if ($values['geetest_api_server'] === '') {
             $errors[] = 'GEETEST_API_SERVER 不能为空';
         }
-        if (!filter_var($values['geetest_api_server'], FILTER_VALIDATE_URL)) {
-            $errors[] = 'GEETEST_API_SERVER 不是合法 URL';
+        if (!\app\support\GeetestEndpoint::isAllowed($values['geetest_api_server'])) {
+            $errors[] = 'GEETEST_API_SERVER 必须是本地允许列表中的 HTTPS 极验地址';
         }
         if ($values['geetest_code_expire'] === '' || !ctype_digit($values['geetest_code_expire'])) {
             $errors[] = 'GEETEST_CODE_EXPIRE 必须是整数';
@@ -199,8 +238,8 @@ class Index extends BaseController
         if (!in_array($appDebug, ['true', 'false', '1', '0'], true)) {
             $errors[] = 'APP_DEBUG 只能是 true/false';
         }
-        if ($values['db_sqlite_path'] === '') {
-            $errors[] = 'DB_SQLITE_PATH 不能为空';
+        if (!preg_match('/\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.db\z/D', $values['db_sqlite_path'])) {
+            $errors[] = 'DB_SQLITE_PATH 只能是安全文件名（字母、数字、下划线、短横线，以 .db 结尾）';
         }
 
         return $errors;
@@ -217,7 +256,7 @@ class Index extends BaseController
     {
         $lines = [];
         $lines[] = 'DB_DRIVER = sqlite';
-        $lines[] = 'DB_PATH = ' . $this->envEncode($values['db_sqlite_path']);
+        $lines[] = 'DB_PATH = ' . $this->envEncode('./database/' . $values['db_sqlite_path']);
 
         return implode("\n", $lines) . "\n";
     }
@@ -237,20 +276,17 @@ class Index extends BaseController
 
     private function resolveSqlitePath(string $sqlitePath, string $rootPath): string
     {
-        $sqlitePath = trim($sqlitePath);
-        if ($sqlitePath === '') {
-            return $rootPath . 'database' . DIRECTORY_SEPARATOR . 'sqlite.db';
+        if (!preg_match('/\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\.db\z/D', $sqlitePath)) {
+            throw new \InvalidArgumentException('无效数据库文件名');
         }
-
-        if (strpos($sqlitePath, '/') === 0 || strpos($sqlitePath, '\\') === 0 || preg_match('/^[a-zA-Z]:/', $sqlitePath)) {
-            return $sqlitePath;
+        $dir = realpath($rootPath . 'database');
+        if ($dir === false || dirname($dir) !== realpath($rootPath) || is_link($rootPath . 'database')) {
+            throw new \RuntimeException('database 必须是后端内的本地目录');
         }
-
-        $sqlitePath = ltrim($sqlitePath, '/\\');
-        return $rootPath . str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $sqlitePath);
+        return $dir . DIRECTORY_SEPARATOR . $sqlitePath;
     }
 
-    private function initSqliteDatabase(string $absoluteDbPath, string $rootPath)
+    private function initSqliteDatabase(string $absoluteDbPath, string $rootPath, \PDO $pdo)
     {
         $dir = dirname($absoluteDbPath);
         if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
@@ -261,8 +297,6 @@ class Index extends BaseController
         }
 
         try {
-            $pdo = new \PDO('sqlite:' . $absoluteDbPath);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
             $sqlFile = $rootPath . 'database' . DIRECTORY_SEPARATOR . 'migrations' . DIRECTORY_SEPARATOR . 'Geetest_Table.sql';
             if (!is_file($sqlFile)) {
@@ -283,11 +317,9 @@ class Index extends BaseController
         return true;
     }
 
-    private function persistSettingsToSqlite(string $absoluteDbPath, array $values)
+    private function persistSettingsToSqlite(string $absoluteDbPath, array $values, \PDO $pdo)
     {
         try {
-            $pdo = new \PDO('sqlite:' . $absoluteDbPath);
-            $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
 
             $nameColumn = 'name';
             try {
@@ -360,34 +392,6 @@ class Index extends BaseController
         }
 
         return true;
-    }
-
-    private function isAlreadyInitialized(): bool
-    {
-        // 检查是否存在已知的 SQLite 数据库文件
-        $possiblePaths = [
-            root_path() . 'database' . DIRECTORY_SEPARATOR . 'sqlite.db',
-            root_path() . 'database' . DIRECTORY_SEPARATOR . 'geetest.db',
-            root_path() . 'sqlite.db',
-        ];
-
-        foreach ($possiblePaths as $dbPath) {
-            if (!is_file($dbPath)) {
-                continue;
-            }
-            try {
-                $pdo = new \PDO('sqlite:' . $dbPath);
-                $pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-                $count = (int)$pdo->query("SELECT COUNT(*) FROM settings")->fetchColumn();
-                if ($count > 0) {
-                    return true;
-                }
-            } catch (\Throwable $e) {
-                // 表不存在或无法连接，继续检查下一个路径
-            }
-        }
-
-        return false;
     }
 
     private function parseApiKeys(string $raw): array
@@ -481,17 +485,18 @@ class Index extends BaseController
             $ok = (bool)($check['ok'] ?? false);
             $title = htmlspecialchars((string)($check['title'] ?? ''), ENT_QUOTES);
             $detail = htmlspecialchars((string)($check['detail'] ?? ''), ENT_QUOTES);
+            if (str_contains($detail, root_path()) || str_contains($detail, str_replace('\\', '/', root_path()))) { $detail = $ok ? '已就绪' : '请检查目录权限'; }
             $statusText = $ok ? '通过' : '未通过';
             $checkItems .= '<li class="check-item ' . ($ok ? 'ok' : 'bad') . '"><div class="check-main"><span class="check-title">' . $title . '</span><span class="check-status">' . $statusText . '</span></div><div class="check-detail">' . $detail . '</div></li>';
         }
 
         $appDebug = htmlspecialchars((string)$values['app_debug'], ENT_QUOTES);
         $captchaId = htmlspecialchars((string)$values['geetest_captcha_id'], ENT_QUOTES);
-        $captchaKey = htmlspecialchars((string)$values['geetest_captcha_key'], ENT_QUOTES);
+        $captchaKey = '';
         $apiServer = htmlspecialchars((string)$values['geetest_api_server'], ENT_QUOTES);
         $codeExpire = htmlspecialchars((string)$values['geetest_code_expire'], ENT_QUOTES);
-        $apiKey = htmlspecialchars((string)$values['api_key'], ENT_QUOTES);
-        $salt = htmlspecialchars((string)$values['salt'], ENT_QUOTES);
+        $apiKey = '';
+        $salt = '';
         $dbSqlitePath = htmlspecialchars((string)$values['db_sqlite_path'], ENT_QUOTES);
 
         $initialStep = $errors ? '2' : '1';
@@ -507,7 +512,9 @@ class Index extends BaseController
     <li class="step-item" data-step="4"><span class="step-index">4</span><span class="step-text">完成</span></li>
   </ol>
 
-  <form method="post" class="form" id="setupForm" autocomplete="off">
+  <form method="post" action="/setup" class="form" id="setupForm" autocomplete="off">
+    <label>一次性安装凭据（服务器运行 php think setup:token，30 分钟有效）</label>
+    <input name="setup_token" type="password" autocomplete="off" required pattern="[a-f0-9]{64}" />
     <section class="panel" data-panel="1">
       <h2>步骤 1：环境检查</h2>
       <p class="desc">先把站点运行目录指向 <span class="mono">backend/public/</span>，并确保上传了 <span class="mono">vendor/</span> 依赖。下面是当前服务器的检测结果（未通过项请先处理）。</p>
@@ -555,21 +562,21 @@ class Index extends BaseController
         <div class="field">
           <label>API_KEY</label>
           <input name="api_key" value="' . $apiKey . '" required />
-          <div class="hint">Bot 调用后端接口用的密钥，建议至少 16 位，且随机性强。</div>
+          <div class="hint">初始管理密钥，请自行保存至少 16 位的随机值；安装后在后台创建普通 Key 供插件使用。</div>
         </div>
         <div class="field">
           <label>SALT</label>
-          <input name="salt" value="' . $salt . '" required />
-          <div class="hint">用于生成内部 token 的盐值；已自动生成一个高强度值，建议不要改成短字符串。</div>
+          <input name="salt" value="' . $salt . '" placeholder="留空由服务器安全生成" />
+          <div class="hint">用于生成内部 token；留空会在提交后由服务器生成高强度随机值。</div>
         </div>
       </div>
 
       <div class="group">
         <div class="group-title">数据库</div>
         <div class="field">
-          <label>DB_SQLITE_PATH</label>
+          <label>DB_SQLITE_PATH（database/ 内的文件名，例如 sqlite.db）</label>
           <input name="db_sqlite_path" value="' . $dbSqlitePath . '" required />
-          <div class="hint">SQLite 文件路径：相对路径以 <span class="mono">backend/</span> 为基准，或填写绝对路径。</div>
+          <div class="hint">只填写安全的 .db 文件名，安装器固定写入 <span class="mono">backend/database/</span>，不会覆盖已有文件。</div>
         </div>
       </div>
 

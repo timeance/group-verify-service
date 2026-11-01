@@ -16,7 +16,7 @@
 Authorization: Bearer <API_KEY>
 ```
 
-`API_KEY` 可在首次初始化 `/setup` 生成，或在管理后台里维护（支持多个 key）。
+初始 Key 在持有一次性安装凭据时通过 `/setup` 配置。默认 Key（最早创建的 Key）管理后台；插件应使用后台新建的普通 Key。
 
 ### 2) 管理后台（API Key）
 
@@ -152,6 +152,8 @@ Authorization: Bearer <API_KEY>
 
 ### 校验验证码（机器人核验）
 
+验证码必须同时属于当前 API Key、群与用户；跨 Key/群/用户的校验失败不会消耗对方验证码。历史无归属验证码不放行，等待原有效期结束后重新生成。
+
 - 方法：POST
 - 路径：`/verify/check`
 - 认证：需要 API Key
@@ -161,7 +163,7 @@ Authorization: Bearer <API_KEY>
 | 参数名 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | group_id | string | 是 | 群/分组 ID（必须为纯数字字符串） |
-| user_id | string | 否 | 用户 ID（必须为纯数字字符串） |
+| user_id | string | 是 | 用户 ID（必须为纯数字字符串，且与创建验证时一致） |
 | code | string | 是 | 页面展示的 6 位验证码 |
 
 成功响应：
@@ -180,14 +182,13 @@ Authorization: Bearer <API_KEY>
 
 可能的错误响应：
 
-- `400`：`参数错误：缺少必填参数 group_id 或 code`
+- `400`：`参数错误：缺少必填参数 group_id、user_id、code 或 API Key`
 - `400`：`参数错误：group_id 必须为数字`
 - `400`：`参数错误：user_id 必须为数字`
 - `400`：`验证失败：验证码已使用`
 - `400`：`验证失败：验证码已过期`
 - `400`：`验证失败：验证码未完成验证`
 - `400`：`验证失败：验证码不存在或已失效`
-- `400`：`验证失败：用户ID不匹配`
 - `401`：认证失败
 - `429`：请求过于频繁（返回中 `passed=false`）
 
