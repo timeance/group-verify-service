@@ -10,7 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/VanillaNahida/group-verify-service?style=flat-square)](https://github.com/VanillaNahida/group-verify-service/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/VanillaNahida/group-verify-service?style=flat-square)](https://github.com/VanillaNahida/group-verify-service/network)
 [![GitHub issues](https://img.shields.io/github/issues/VanillaNahida/group-verify-service?style=flat-square)](https://github.com/VanillaNahida/group-verify-service/issues)
-[![php8](https://img.shields.io/badge/PHP-8.0+-blue.svg?style=flat-square)](https://www.php.net/)
+[![php8](https://img.shields.io/badge/PHP-8.4+-blue.svg?style=flat-square)](https://www.php.net/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-brightgreen.svg?style=flat-square)]()
 
 [📦 下载使用](#-安装步骤) | [📖 API文档](#-api-文档) | [💬 问题反馈](https://github.com/VanillaNahida/group-verify-service/issues)
@@ -43,14 +43,16 @@
 
 - API 文档：见 [API.md](API.md)
 - 安全升级与安装凭据：见 [docs/security-upgrade.md](docs/security-upgrade.md)
+- 生产构建、Nginx 限制和依赖回滚：见 [docs/production-dependencies.md](docs/production-dependencies.md)
 
 ## 快速部署（推荐：上传即用）
 
 1. 环境要求
 
-- PHP 8.0+
-- PHP 扩展：fileinfo、sqlite3、pdo_sqlite,mbstring
-- 执行composer install命令
+- PHP 8.4 最新补丁（本次验证 8.4.27）
+- 前端构建：Node 22 最新补丁且不低于 22.12
+- PHP 扩展：ctype、curl、fileinfo、json、mbstring、openssl、pdo_sqlite、sqlite3；Composer 解压需 zip
+- 执行 `composer install --no-dev --optimize-autoloader`
 
 2. 上传并设置站点目录
 
@@ -62,9 +64,15 @@
 
 ```nginx
 location / {
-  if (!-e $request_filename) {
-    rewrite ^(.*)$ /index.php?s=$1 last;
-  }
+  try_files $uri $uri/ /index.php?s=$uri&$query_string;
+}
+location = /index.php {
+  include fastcgi_params;
+  fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+  fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+}
+location ~* \.(?:php[0-9]*|phtml|phar)(?:/|$) {
+  return 404;
 }
 ```
 
@@ -100,14 +108,17 @@ php think run
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm ci
+npm run dev -- --host 127.0.0.1
 ```
+
+开发服务器禁止对公网开放。生产站点只运行 PHP 入口和正式静态产物。
 
 构建产物（用于部署）：
 
 ```bash
 cd frontend
+npm ci
 npm run build
 ```
 

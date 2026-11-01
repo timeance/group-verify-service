@@ -3,20 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
-    "dev": "vite --host",
+    "dev": "vite --host 127.0.0.1",
     "build": "vite-ssg build",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "@arco-design/web-vue": "^2.57.0",
-    "vue": "^3.4.0"
+    "@arco-design/web-vue": "2.59.0",
+    "vue": "3.5.44"
   },
   "devDependencies": {
-    "@unhead/vue": "^2.0.0",
-    "@vitejs/plugin-vue": "^5.2.0",
-    "vite": "^5.4.0",
-    "vite-ssg": "^28.2.2"
+    "@unhead/vue": "2.1.17",
+    "@vitejs/plugin-vue": "6.0.10",
+    "vite": "7.3.7",
+    "vite-ssg": "28.3.0"
   }
 }
-

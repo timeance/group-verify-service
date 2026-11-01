@@ -20,15 +20,14 @@
         }
     ],
     "require": {
-        "php": ">=8.0.0",
+        "php": ">=8.4.0",
         "topthink/framework": "^8.0",
         "topthink/think-orm": "^4.0",
-        "topthink/think-filesystem": "^2.0",
+        "topthink/think-filesystem": "^3.0",
         "topthink/think-helper": "^3.1",
         "topthink/think-view": "^2.0",
-        "league/flysystem": "^1.1",
-        "topthink/think-template": "^3.0",
-        "zhaoyj/think-helper": "*"
+        "league/flysystem": "^3.36",
+        "topthink/think-template": "^3.0"
     },
     "require-dev": {
         "topthink/think-dumper": "^1.0",
@@ -37,9 +36,6 @@
     "autoload": {
         "psr-4": {
             "app\\": "app"
-        },
-        "psr-0": {
-            "": "extend/"
         }
     },
     "config": {
