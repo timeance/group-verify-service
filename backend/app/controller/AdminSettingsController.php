@@ -3,12 +3,21 @@ namespace app\controller;
 
 use app\BaseController;
 use app\model\GeetestModel;
+use app\support\GeetestEndpoint;
 use app\traits\ApiKeyTrait;
 use think\facade\Db;
 
 class AdminSettingsController extends BaseController
 {
     use ApiKeyTrait;
+
+    /**
+     * 管理控制器不能只依赖 route/app.php 的路由中间件。
+     * 直接访问控制器动作时也必须使用默认 API Key。
+     */
+    protected $middleware = [
+        \app\middleware\AdminApiKeyAuth::class,
+    ];
 
     protected function getSettingWithFallback(string $key, string $default = ''): array
     {
@@ -220,6 +229,11 @@ class AdminSettingsController extends BaseController
             if ($type === 'url') {
                 if (!filter_var($v, FILTER_VALIDATE_URL)) {
                     $errors[] = $k . ' 不是合法 URL';
+                    continue;
+                }
+
+                if ($k === 'GEETEST_API_SERVER' && !GeetestEndpoint::isAllowed($v)) {
+                    $errors[] = $k . ' 必须使用 HTTPS 官方端点，或使用服务器本地 allowlist 中的端点';
                     continue;
                 }
             }

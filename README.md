@@ -42,6 +42,7 @@
 ## 文档
 
 - API 文档：见 [API.md](API.md)
+- 安全升级与安装凭据：见 [docs/security-upgrade.md](docs/security-upgrade.md)
 
 ## 快速部署（推荐：上传即用）
 
@@ -69,15 +70,19 @@ location / {
 
 4. 首次初始化
 
-- 访问：`https://你的域名/setup`
+- 先在服务器 `backend/` 目录，以 PHP 服务运行用户执行 `php think setup:token`，生成仅显示一次、30 分钟有效的安装凭据
+- 再访问：`https://你的域名/setup`；未生成有效凭据时入口返回 `404`
+- 在表单内填写安装凭据，通过 POST 提交，禁止放入 URL
 - 按页面提示填写 `GEETEST_CAPTCHA_ID`、`GEETEST_CAPTCHA_KEY`、`API_KEY`、`SALT` 等
 - 初始化成功后会生成 `.env` 并初始化 SQLite
-- 仅首次可用：当 `.env` 已存在时，`/setup` 返回 `404`
+- 数据库文件名只能填写 `sqlite.db` 之类的安全名称，安装器会放在 `backend/database/` 内
+- 初始化成功后消费凭据并关闭入口；已有配置或已初始化数据库会拒绝重复初始化
 
 ## 管理后台
 
 - 页面入口：`/admin`、`/admin/login`
-- 管理接口统一使用 API Key 鉴权
+- 管理接口只接受默认 API Key（最早创建的 Key）；机器人插件应使用管理后台新建的普通 Key
+- 普通 Key 只能管理自己的验证记录；`/verify/check` 必须携带创建验证时相同的 Key、群和用户
 
 ## 本地开发
 
@@ -126,10 +131,10 @@ npm run build
 | GEETEST_CAPTCHA_KEY | 极验验证码 Key |
 | GEETEST_API_SERVER | 极验 API Server（默认 `https://gcaptcha4.geetest.com`） |
 | GEETEST_CODE_EXPIRE | 验证码有效期（秒，默认 300） |
-| API_KEY | 机器人接口访问密钥（支持多个） |
+| API_KEY | 初始 API Key；最早的 Key 为管理 Key，插件应配置普通 Key |
 | SALT | ticket 生成盐值（建议至少 32 位） |
 | DB_DRIVER | 数据库驱动（默认 sqlite） |
-| DB_SQLITE_PATH | SQLite 路径（默认 `./database/geetest.db`） |
+| DB_SQLITE_PATH | 仅网页安装表单字段：安全 `.db` 文件名；实际 `.env` 使用 `DB_PATH`，已有数据库路径不自动移动 |
 
 ## 安全建议
 

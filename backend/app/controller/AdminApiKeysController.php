@@ -9,6 +9,14 @@ class AdminApiKeysController extends BaseController
 {
     use ApiKeyTrait;
 
+    /**
+     * 管理控制器不能只依赖 route/app.php 的路由中间件。
+     * 直接访问控制器动作时也必须使用默认 API Key。
+     */
+    protected $middleware = [
+        \app\middleware\AdminApiKeyAuth::class,
+    ];
+
     public function list()
     {
         $this->ensureApiKeysMigrated();

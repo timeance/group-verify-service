@@ -5,6 +5,7 @@
 return [
     // 指令定义
     'commands' => [
+        'setup:token' => 'app\command\SetupToken',
         'db:init' => 'app\command\InitDatabase',
     ],
 ];
