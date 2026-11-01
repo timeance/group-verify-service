@@ -11,3 +11,5 @@ geetest.db
 /.setup*
 /.installed
 /vendor/
+
+/public/static/verify/
